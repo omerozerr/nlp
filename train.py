@@ -141,7 +141,7 @@ class BiagramLanguageModel(nn.Module):
     def __init__(self, n_layer, n_head, n_embd):
         super().__init__()
         self.tok_emb = nn.Embedding(unique_tokens, n_embd)
-        self.position_embedding_table = nn.Embedding(unique_tokens, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
         self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, unique_tokens)
