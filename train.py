@@ -55,7 +55,7 @@ def get_batch(split):
 @torch.no_grad()
 def estimate_loss():
     out = {}
-    m.eval()  # Use 'm' instead of 'model'
+    model.eval()  # Use 'm' instead of 'model'
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
@@ -64,7 +64,7 @@ def estimate_loss():
             logits, loss = m(X, Y)  # Use 'm' instead of 'model'
             losses[k] = loss.item()
         out[split] = losses.mean()
-    m.train()  # Use 'm' instead of 'model'
+    model.train()  # Use 'm' instead of 'model'
     return out
 
 
