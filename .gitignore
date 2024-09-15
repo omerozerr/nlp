@@ -1,2 +1,4 @@
 /venv
 bigram_language_model.pth
+bigram_language_model_iter_42500.pth
+/edu_fineweb10B

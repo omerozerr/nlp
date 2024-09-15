@@ -3,22 +3,24 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from collections import Counter
+import numpy as np
+import os
 
 # hyperparameters
 batch_size = 16 # how many independent sequences will we process in parallel?
-block_size = 32 # what is the maximum context length for predictions?
-max_iters = 7500
-eval_interval = 200
+block_size = 128 # what is the maximum context length for predictions?
+max_iters = 50000
+eval_interval = 100
 learning_rate = 1e-3
-device = torch.device('mps')
+device = 'mps'
 eval_iters = 200
-n_embd = 64
-n_head = 4
+n_embd = 128
+n_head = 8
 n_layer = 4
-dropout = 0.1
+dropout = 0.2
 # ------------
 
-torch.manual_seed(1337)
+#torch.manual_seed(1337)
 
 with(open ("input.txt", "r", encoding='utf-8')) as f:
     text = f.read()
@@ -32,7 +34,7 @@ tokens = tokenizer.encode(text)
 token_counts = Counter(tokens)
 
 # Get the number of unique tokens
-unique_tokens = len(token_counts)
+unique_tokens = 50257
 
 data = torch.tensor(tokens, dtype=torch.long)
 n = int(0.9*len(data)) # first 90% will be train, rest val
@@ -52,6 +54,52 @@ def get_batch(split):
     labels = torch.stack([data[s+1:s+block_size+1] for s in start])
     return batch, labels
 
+def load_tokens(filename):
+    npt = np.load(filename)
+    npt = npt.astype(np.int32) # added after video
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
+
+
+class DataLoaderLite:
+    def __init__(self, B, T, split):
+        self.B = B
+        self.T = T
+        assert split in {'train', 'val'}
+
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        self.reset()
+
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the position in the tensor
+        self.current_position += B * T
+        # if loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B * T + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T
+        return x, y
+
+train_loader = DataLoaderLite(B=batch_size, T=block_size, split="train")
+val_loader = DataLoaderLite(B=batch_size, T=block_size, split="val")
+
 @torch.no_grad()
 def estimate_loss():
     out = {}
@@ -59,9 +107,12 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            if split == 'train':
+                X, Y = train_loader.next_batch()
+            else:
+                X, Y = val_loader.next_batch()
             X, Y = X.to(device), Y.to(device)
-            logits, loss = m(X, Y)  # Use 'm' instead of 'model'
+            logits, loss = model(X, Y)  # Use 'm' instead of 'model'
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()  # Use 'm' instead of 'model'
@@ -81,7 +132,7 @@ class Head(nn.Module):
     def forward(self, x):
         B,T,C = x.shape
         k = self.k(x)  # (B,T,C)
-        q = self.q(x) # (B,T,C)
+        q = self.q(x) # (B,T,C) 
         v = self.v(x) # (B,T,C)
 
         # compute attention scores ("affinities")
@@ -126,7 +177,9 @@ class Block(nn.Module):
     def __init__(self, n_embd, n_head):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
+        #######
         head_size = n_embd // n_head
+        ######
         self.sa = MultipleHeadAttention(n_head, head_size)
         self.ffwd = FeedFoward(n_embd)
         self.ln1 = nn.LayerNorm(n_embd)
@@ -151,7 +204,7 @@ class BiagramLanguageModel(nn.Module):
 
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.tok_emb(idx) # (B,T,C)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
         x = tok_emb + pos_emb # (B,T,C)
         x = self.blocks(x) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
@@ -185,25 +238,41 @@ class BiagramLanguageModel(nn.Module):
         return idx
     
 if __name__ == "__main__":
-    # Your training code goes here
+    # Set precision for matmul
+    torch.set_float32_matmul_precision('high')
+
+    # Initialize your model
     model = BiagramLanguageModel(n_layer, n_head, n_embd)
     model.to(device)
-    
-    # Training loop
+
+    # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+    # Training loop
     for iter in range(max_iters):
-        # Your training code here
+        # Evaluation and printing loss at the evaluation interval
         if iter % eval_interval == 0 or iter == max_iters - 1:
             losses = estimate_loss()
             print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-        xb, yb = get_batch('train')
+        # Fetch the next batch
+        xb, yb = train_loader.next_batch()
         xb, yb = xb.to(device), yb.to(device)
+
+        # Forward pass, loss computation, and backward pass
         logits, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
-    
-    # Save the trained model
-    torch.save(model.state_dict(), 'bigram_language_model.pth')
+
+        # Save the model every 5000 iterations
+        if iter % 2500 == 0 and iter > 0:
+            save_path = f'bigram_language_model_iter_{iter}.pth'
+            torch.save(model.state_dict(), save_path)
+            print(f"Model saved at iteration {iter}")
+
+    # Save the final trained model
+    torch.save(model.state_dict(), 'bigram_language_model_final.pth')
+    print("Final model saved.")
+
 
