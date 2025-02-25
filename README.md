@@ -1,6 +1,6 @@
 ## Ömer Özer NLP Repo
 
-#### This repo contains my attempts to create encoder and decoder architectures using PyTorch. While writing the codes, I got help from Andrej Karpathy's videos and the codes he wrote.
+#### This repo contains my attempts to create encoder and decoder architectures using PyTorch. While writing the codes, I got help from Andrej Karpathy's videos and codes he wrote.
 
 ### Datasets
 
